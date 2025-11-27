@@ -1,0 +1,115 @@
+# agent.py
+from typing import Dict, List, Any
+from environment import HouseholdEnvironment, Appliance, HVACSystem
+
+
+class EnergyAdvisorAgent:
+    """
+    Very first version of the energy advisor.
+    Right now: just does a simple greedy assignment to cheap hours.
+    """
+
+    def __init__(self, env: HouseholdEnvironment):
+        self.env = env
+
+    def plan_day(self) -> Dict[str, Any]:
+        """
+        Produce:
+          - a baseline schedule: run everything as soon as possible
+          - a greedy schedule: run each appliance in cheapest available hours
+        """
+        baseline_schedule, baseline_hvac = self._baseline_policy()
+        baseline_metrics = self.env.simulate_day(baseline_schedule, baseline_hvac)
+
+        greedy_schedule, greedy_hvac = self._greedy_policy()
+        greedy_metrics = self.env.simulate_day(greedy_schedule, greedy_hvac)
+
+        return {
+            "baseline_schedule": baseline_schedule,
+            "baseline_hvac": baseline_hvac,
+            "baseline_metrics": baseline_metrics,
+            "greedy_schedule": greedy_schedule,
+            "greedy_hvac": greedy_hvac,
+            "greedy_metrics": greedy_metrics,
+        }
+
+    # ---------- Policies ----------
+
+    def _baseline_policy(self) -> (Dict[int, List[str]], List[float]):
+        """
+        Baseline:
+          - Run each appliance as soon as possible (starting at hour 0).
+          - Keep HVAC setpoint constant all day.
+        """
+        schedule: Dict[int, List[str]] = {h: [] for h in range(24)}
+        current_hour = 0
+
+        for a in self.env.appliances:
+            # schedule back-to-back from current_hour
+            start_hour = current_hour
+            end_hour = min(24, current_hour + a.duration_hours)
+            if end_hour - start_hour < a.duration_hours:
+                # Not enough time, but we still put what we can
+                pass
+            schedule[start_hour].append(a.name)
+            current_hour = end_hour
+
+        hvac_setpoints = [self.env.hvac.base_setpoint] * 24
+        return schedule, hvac_setpoints
+
+    def _greedy_policy(self) -> (Dict[int, List[str]], List[float]):
+        """
+        Simple greedy scheduler:
+          - For each appliance, pick the cheapest available hours before its deadline.
+          - HVAC: slightly relax during peak price hours.
+        """
+        prices = self.env.tou_prices
+        schedule: Dict[int, List[str]] = {h: [] for h in range(24)}
+
+        # For simplicity we assume no limit on how many appliances can run at once.
+        # Later, you can add constraints if you want.
+
+        # Sort appliances by deadline (earliest first)
+        appliances_sorted = sorted(self.env.appliances, key=lambda a: a.deadline_hour)
+
+        for a in appliances_sorted:
+            # Candidate hours: from 0 up to and including deadline_hour
+            latest_start = max(0, a.deadline_hour - a.duration_hours + 1)
+            best_start = 0
+            best_cost = float("inf")
+
+            for start in range(0, latest_start + 1):
+                end = start + a.duration_hours
+                if end > 24:
+                    continue
+                # Cost of running this appliance from start to end-1
+                cost = 0.0
+                for h in range(start, end):
+                    cost += a.power_kw * prices[h]
+                if cost < best_cost:
+                    best_cost = cost
+                    best_start = start
+
+            # Assign appliance at best_start
+            schedule[best_start].append(a.name)
+
+        # HVAC policy: relax comfort slightly during expensive hours
+        hvac_setpoints: List[float] = []
+        base = self.env.hvac.base_setpoint
+        min_t = self.env.hvac.min_temp
+        max_t = self.env.hvac.max_temp
+
+        # Define "peak" as top 25% of prices
+        sorted_prices = sorted(prices)
+        peak_threshold = sorted_prices[int(0.75 * len(sorted_prices))]
+
+        for h in range(24):
+            p = prices[h]
+            if p >= peak_threshold:
+                # During peak, try to save a bit: slightly warmer if cooling
+                setpoint = min(max_t, base + 2.0)
+            else:
+                setpoint = base
+            hvac_setpoints.append(setpoint)
+
+        return schedule, hvac_setpoints
