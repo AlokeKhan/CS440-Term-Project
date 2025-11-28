@@ -147,3 +147,182 @@ class Household:
         appliance.isScheduled = True
         appliance.scheduled_start = start_hour
     
+# Make Appliance easier to construct.
+def _appliance_init(self, name, powerkW, durationHours, deadlineHour, isFlexible=True):
+    self.name = name
+    self.powerkW = float(powerkW)
+    self.durationHours = float(durationHours)
+    self.deadlineHour = int(deadlineHour)
+    self.isFlexible = bool(isFlexible)
+    self.isScheduled = False
+    self.scheduledStart = None
+    self.scheduled_start = None
+
+
+Appliance.__init__ = _appliance_init
+
+
+def _get_duration_hours(self):
+    return self.durationHours
+
+
+def _set_duration_hours(self, value):
+    self.durationHours = float(value)
+
+
+Appliance.duration_hours = property(_get_duration_hours, _set_duration_hours)
+
+
+def _get_deadline_hour(self):
+    return self.deadlineHour
+
+
+def _set_deadline_hour(self, value):
+    self.deadlineHour = int(value)
+
+
+Appliance.deadline_hour = property(_get_deadline_hour, _set_deadline_hour)
+
+
+def _get_power_kw(self):
+    return self.powerkW
+
+
+def _set_power_kw(self, value):
+    self.powerkW = float(value)
+
+
+Appliance.power_kw = property(_get_power_kw, _set_power_kw)
+
+
+# HVAC compatibility aliases used by the agent.
+def _get_base_setpoint(self):
+    return self.setpoint
+
+
+def _set_base_setpoint(self, value):
+    self.setpoint = float(value)
+
+
+HVACSystem.base_setpoint = property(_get_base_setpoint, _set_base_setpoint)
+
+
+def _get_min_temp(self):
+    return self.minTemp
+
+
+def _set_min_temp(self, value):
+    self.minTemp = float(value)
+
+
+HVACSystem.min_temp = property(_get_min_temp, _set_min_temp)
+
+
+def _get_max_temp(self):
+    return self.maxTemp
+
+
+def _set_max_temp(self, value):
+    self.maxTemp = float(value)
+
+
+HVACSystem.max_temp = property(_get_max_temp, _set_max_temp)
+
+
+# TOUPricing alias for pricing_type used inside _create_pricing_schedule.
+def _get_pricing_type(self):
+    return getattr(self, "pricingType", "standard")
+
+
+def _set_pricing_type(self, value):
+    self.pricingType = value
+
+
+TOUPricing.pricing_type = property(_get_pricing_type, _set_pricing_type)
+
+
+class HouseholdEnvironment(Household):
+    def __init__(self, monthlyBudget, pricingType: str = "standard", currentDay: int = 1, monthDays=30):
+        super().__init__(monthlyBudget, pricingType, currentDay, monthDays)
+
+    @property
+    def tou_prices(self):
+        return [self.tou_pricing.get_price(h) for h in range(24)]
+
+    def simulate_day(self, schedule, hvac_setpoints):
+        self.energyUsedToday = 0.0
+        self.todayCost = 0.0
+        self.hourly_usage = [0.0] * 24
+        self.hourly_costs = [0.0] * 24
+
+        for a in self.appliances:
+            a.isScheduled = False
+            if hasattr(a, "scheduled_start"):
+                a.scheduled_start = None
+            if hasattr(a, "scheduledStart"):
+                a.scheduledStart = None
+
+        for hour, names in schedule.items():
+            for name in names:
+                for a in self.appliances:
+                    if a.name == name:
+                        a.isScheduled = True
+                        a.scheduled_start = hour
+                        a.scheduledStart = hour
+                        break
+
+        comfort_violations = 0
+
+        for h in range(24):
+            if hvac_setpoints and h < len(hvac_setpoints):
+                self.hvac.setpoint = float(hvac_setpoints[h])
+                self.hvac.currentTemp = float(hvac_setpoints[h])
+
+            if not self.hvac.is_comfortable():
+                comfort_violations += 1
+
+            usage = 0.0
+            for a in self.appliances:
+                start = getattr(a, "scheduled_start", getattr(a, "scheduledStart", None))
+                duration = getattr(a, "durationHours", 0)
+                if start is None or not duration:
+                    continue
+                if start <= h < start + duration:
+                    usage += float(getattr(a, "powerkW", 0.0))
+
+            usage += float(getattr(self.hvac, "powerkW", 0.0))
+
+            price = self.tou_pricing.get_price(h)
+            cost = usage * price
+
+            self.hourly_usage[h] = usage
+            self.hourly_costs[h] = cost
+
+            self.energyUsedToday += usage
+            self.todayCost += cost
+
+        self.energyUsedMonth += self.energyUsedToday
+        self.monthCost += self.todayCost
+
+        missed_deadlines = 0
+        for a in self.appliances:
+            start = getattr(a, "scheduled_start", getattr(a, "scheduledStart", None))
+            duration = getattr(a, "durationHours", 0)
+            deadline = getattr(a, "deadlineHour", 23)
+            if start is None or not duration:
+                continue
+            finish = start + duration
+            if finish > deadline:
+                missed_deadlines += 1
+
+        daily_budget = self.get_daily_budget()
+
+        return {
+            "total_kwh": self.energyUsedToday,
+            "total_cost": self.todayCost,
+            "hourly_usage": self.hourly_usage,
+            "hourly_costs": self.hourly_costs,
+            "comfort_violations": comfort_violations,
+            "missed_deadlines": missed_deadlines,
+            "daily_budget_kwh": daily_budget,
+        }   
